@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 warnings.filterwarnings("ignore")
 datatype = torch.float32
 
+from itertools import repeat
 
 class StructureData(Dataset):
     """A simple torch Dataset of structures."""
@@ -682,6 +683,83 @@ class StructureJsonData(Dataset):
             test_loader = None
         return train_loader, val_loader, test_loader
 
+class StructureJsonData_pair(StructureJsonData):
+    
+    def __len__(self) -> int:
+        """Get the number of structures with targets in the dataset."""
+        return len(self.keys)
+
+    @functools.cache  # Cache loaded structures
+    def __getitem__(self, idx):
+        """Get one pair of items in the dataset.
+        Returns:
+            crystal_graph (CrystalGraph): graph of the crystal structure
+            targets (dict): dictionary of targets. i.e. energy, force, stress, magmom
+        """
+        if idx not in self.failed_idx:  
+            mp_id1, graph_id1 = self.keys[idx]
+            mp_id2 = mp_id1
+            cnt = 0
+            for _ in repeat(None):
+                cnt += 1
+                random.seed(7)
+                graph_id2 = random.choice(list(self.data[mp_id2].keys()))
+                if (graph_id2 != graph_id1) or cnt == 20:
+                    break
+            try:
+                struct1 = Structure.from_dict(self.data[mp_id1][graph_id1]["structure"])
+                crystal_graph1 = self.graph_converter(
+                    struct1, graph_id=graph_id1, mp_id=mp_id1
+                )
+                struct2 = Structure.from_dict(self.data[mp_id2][graph_id2]["structure"])
+                crystal_graph2 = self.graph_converter(
+                    struct2, graph_id=graph_id2, mp_id=mp_id2
+                )
+
+                targets1 = {}
+                targets2 = {}
+                for key in self.targets:
+                    if key == "e":
+                        energy1 = self.data[mp_id1][graph_id1][self.energy_key]
+                        energy2 = self.data[mp_id2][graph_id2][self.energy_key]
+                        targets1["e"] = torch.tensor(energy1, dtype=datatype)
+                        targets2["e"] = torch.tensor(energy2, dtype=datatype)
+                    elif key == "f":
+                        force1 = self.data[mp_id1][graph_id1][self.force_key]
+                        force2 = self.data[mp_id2][graph_id2][self.force_key]
+                        targets1["f"] = torch.tensor(force1, dtype=datatype)
+                        targets2["f"] = torch.tensor(force2, dtype=datatype)
+                    elif key == "s":
+                        stress1 = self.data[mp_id1][graph_id1][self.stress_key]
+                        stress2= self.data[mp_id2][graph_id2][self.stress_key]
+                        # Convert VASP stress
+                        targets1["s"] = torch.tensor(stress1, dtype=datatype) * (-0.1)
+                        targets2["s"] = torch.tensor(stress2, dtype=datatype) * (-0.1)
+                    elif key == "m":
+                        mag1 = self.data[mp_id1][graph_id1][self.magmom_key]
+                        mag2 = self.data[mp_id2][graph_id2][self.magmom_key]
+                        # use absolute value for magneticf moments
+                        if mag1 is None:
+                            targets1["m"] = None
+                        else:
+                            targets1["m"] = torch.abs(torch.tensor(mag1, dtype=datatype))
+                        if mag2 is None:
+                            targets2["m"] = None
+                        else:
+                            targets2["m"] = torch.abs(torch.tensor(mag2, dtype=datatype))
+                return crystal_graph1, crystal_graph2, targets1, targets2
+
+                # Omit structures with isolated atoms. Return another randomly selected structure
+            except Exception:
+                structure1 = Structure.from_dict(self.data[mp_id1][graph_id1]["structure"])
+                self.failed_graph_id[graph_id1] = structure1.composition.formula
+                self.failed_idx.append(idx)
+                idx = random.randint(0, len(self) - 1)
+                return self.__getitem__(idx)
+        else:
+            idx = random.randint(0, len(self) - 1)
+            return self.__getitem__(idx)
+
 
 def collate_graphs(batch_data: list):
     """Collate of list of (graph, target) into batch data.
@@ -709,6 +787,43 @@ def collate_graphs(batch_data: list):
                 all_targets[target].append(value)
 
     return graphs, all_targets
+
+
+def collate_graphs_pair(batch_data: list):
+    """Collate of list of (graph1, graph2, target1, target2) into batch data.
+
+    Args:
+        batch_data (list): list of (graph1, graph2, target1(dict), target2(dict))
+
+    Returns:
+        graphs1 (List), graphs2 (List): a list of graphs
+        targets1 (Dict),  targets2 (Dict): dictionary of targets, where key and values are:
+            e (Tensor): energies of the structures [batch_size]
+            f (Tensor): forces of the structures [n_batch_atoms, 3]
+            s (Tensor): stresses of the structures [3*batch_size, 3]
+            m (Tensor): magmom of the structures [n_batch_atoms]
+    """
+    graphs1 = [graph1 for graph1, graph2, _1, _2 in batch_data]
+    graphs2 = [graph2 for graph1, graph2, _1, _2 in batch_data]
+    all_targets1 = {key: [] for key in batch_data[0][2]}
+    all_targets1["e"] = torch.tensor(
+        [targets1["e"] for _1, _2, targets1, targets2 in batch_data], dtype=datatype
+    )
+    all_targets2 = {key: [] for key in batch_data[0][2]}
+    all_targets2["e"] = torch.tensor(
+        [targets2["e"] for _1, _2, targets1, targets2 in batch_data], dtype=datatype
+    )
+
+    for _1, _2, targets1, targets2 in batch_data:
+        for target1, value in targets1.items():
+            if target1 != "e":
+                all_targets1[target1].append(value)
+    for _1, _2, targets1, targets2 in batch_data:
+        for target2, value in targets2.items():
+            if target2 != "e":
+                all_targets2[target2].append(value)
+
+    return graphs1, graphs2, all_targets1, all_targets2
 
 
 def get_train_val_test_loader(
@@ -798,6 +913,32 @@ def get_loader(dataset, batch_size=64, num_workers=0, pin_memory=True):
         dataset,
         batch_size=batch_size,
         collate_fn=collate_graphs,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
+
+
+def get_loader_pair(dataset, batch_size=64, num_workers=0, pin_memory=True):
+    """Get a dataloader from a paired dataset.
+
+    Args:
+        dataset (Dataset): The dataset to partition.
+        batch_size (int): The batch size for the data loaders
+            Default = 64
+        num_workers (int): The number of worker processes for loading the data
+            see torch Dataloader documentation for more info
+            Default = 0
+        pin_memory (bool): Whether to pin the memory of the data loaders
+            Default: True
+
+    Returns:
+        data_loader
+    """
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        collate_fn=collate_graphs_pair,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=pin_memory,
