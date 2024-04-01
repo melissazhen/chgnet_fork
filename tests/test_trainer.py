@@ -38,7 +38,7 @@ data = StructureData(
 
 def test_trainer(tmp_path: Path) -> None:
     chgnet = CHGNet.load()
-    train_loader, val_loader, test_loader = get_train_val_test_loader(
+    train_loader, val_loader, _test_loader = get_train_val_test_loader(
         data, batch_size=16, train_ratio=0.9, val_ratio=0.05
     )
     trainer = Trainer(
@@ -68,7 +68,7 @@ def test_trainer_composition_model(tmp_path: Path) -> None:
     chgnet = CHGNet.load()
     for param in chgnet.composition_model.parameters():
         assert param.requires_grad is False
-    train_loader, val_loader, test_loader = get_train_val_test_loader(
+    train_loader, val_loader, _test_loader = get_train_val_test_loader(
         data, batch_size=16, train_ratio=0.9, val_ratio=0.05
     )
     trainer = Trainer(
@@ -93,9 +93,9 @@ def test_trainer_composition_model(tmp_path: Path) -> None:
     new_chgnet = CHGNet.from_file(weights_path)
     for param in new_chgnet.composition_model.parameters():
         assert param.requires_grad is False
-    comparison = (
-        new_chgnet.composition_model.state_dict()["fc.weight"] == initial_weights
-    )
+    comparison = new_chgnet.composition_model.state_dict()["fc.weight"].to(
+        "cpu"
+    ) == initial_weights.to("cpu")
     expect = torch.ones_like(comparison)
     # Only Na and Cl should have updated
     expect[0][10] = 0

@@ -22,7 +22,7 @@ from chgnet.model.layers import (
     GraphAttentionReadOut,
     GraphPooling,
 )
-from chgnet.utils import cuda_devices_sorted_by_free_mem
+from chgnet.utils import determine_device
 
 if TYPE_CHECKING:
     from chgnet import PredTask
@@ -663,7 +663,7 @@ class CHGNet(nn.Module):
         return chgnet
 
     @classmethod
-    def from_file(cls, path, **kwargs) -> CHGNet:
+    def from_file(cls, path: str, **kwargs) -> CHGNet:
         """Build a CHGNet from a saved file."""
         state = torch.load(path, map_location=torch.device("cpu"))
         return CHGNet.from_dict(state["model"], **kwargs)
@@ -673,6 +673,7 @@ class CHGNet(nn.Module):
         cls,
         model_name="0.3.0",
         use_device: str | None = None,
+        check_cuda_mem: bool = True,
         verbose: bool = True,
     ) -> CHGNet:
         """Load pretrained CHGNet model.
@@ -684,6 +685,8 @@ class CHGNet(nn.Module):
                 either "cpu", "cuda", or "mps". If not specified, the default device is
                 automatically selected based on the available options.
                 Default = None
+            check_cuda_mem (bool): Whether to use cuda with most available memory
+                Default = True
             verbose (bool): whether to print model device information
                 Default = True
         Raises:
@@ -707,12 +710,7 @@ class CHGNet(nn.Module):
         )
 
         # Determine the device to use
-        if use_device == "mps" and torch.backends.mps.is_available():
-            device = "mps"
-        else:
-            device = use_device or ("cuda" if torch.cuda.is_available() else "cpu")
-            if device == "cuda":
-                device = f"cuda:{cuda_devices_sorted_by_free_mem()[-1]}"
+        device = determine_device(use_device=use_device, check_cuda_mem=check_cuda_mem)
 
         # Move the model to the specified device
         model = model.to(device)
@@ -763,7 +761,7 @@ class BatchedGraph:
     directed2undirected: Tensor
     atom_positions: Sequence[Tensor]
     strains: Sequence[Tensor]
-    volumes: Sequence[Tensor]
+    volumes: Sequence[Tensor] | Tensor
 
     @classmethod
     def from_graphs(
@@ -790,8 +788,7 @@ class BatchedGraph:
         batched_atom_graph, batched_bond_graph = [], []
         directed2undirected = []
         atom_owners = []
-        atom_offset_idx = 0
-        n_undirected = 0
+        atom_offset_idx = n_undirected = 0
 
         for graph_idx, graph in enumerate(graphs):
             # Atoms
@@ -807,7 +804,9 @@ class BatchedGraph:
             else:
                 strain = None
                 lattice = graph.lattice
-            volumes.append(torch.dot(lattice[0], torch.cross(lattice[1], lattice[2])))
+            volumes.append(
+                torch.dot(lattice[0], torch.linalg.cross(lattice[1], lattice[2]))
+            )
             strains.append(strain)
 
             # Bonds
