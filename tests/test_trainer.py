@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import numpy as np
+import pytest
 import torch
+import wandb
 from pymatgen.core import Lattice, Structure
 
 from chgnet.data.dataset import StructureData, get_train_val_test_loader
@@ -34,13 +37,14 @@ data = StructureData(
     stresses=stresses,
     magmoms=magmoms,
 )
+train_loader, val_loader, _test_loader = get_train_val_test_loader(
+    data, batch_size=16, train_ratio=0.9, val_ratio=0.05
+)
+chgnet = CHGNet.load()
 
 
-def test_trainer(tmp_path: Path) -> None:
-    chgnet = CHGNet.load()
-    train_loader, val_loader, _test_loader = get_train_val_test_loader(
-        data, batch_size=16, train_ratio=0.9, val_ratio=0.05
-    )
+def test_trainer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    extra_run_config = dict(some_other_hyperparam=42)
     trainer = Trainer(
         model=chgnet,
         targets="efsm",
@@ -48,29 +52,38 @@ def test_trainer(tmp_path: Path) -> None:
         criterion="MSE",
         learning_rate=1e-2,
         epochs=5,
+        wandb_path="test/run",
+        wandb_init_kwargs=dict(anonymous="must"),
+        extra_run_config=extra_run_config,
     )
-    dir_name = "test_tmp_dir"
-    test_dir = tmp_path / dir_name
-    trainer.train(train_loader, val_loader, save_dir=test_dir)
+    trainer.train(
+        train_loader,
+        val_loader,
+        save_dir=tmp_path,
+        save_test_result=tmp_path / "test-preds.json",
+    )
+    assert dict(wandb.config).items() >= extra_run_config.items()
     for param in chgnet.composition_model.parameters():
         assert param.requires_grad is False
-    assert test_dir.is_dir(), "Training dir was not created"
+    assert tmp_path.is_dir(), "Training dir was not created"
 
-    output_files = [file.name for file in test_dir.iterdir()]
+    output_files = [file.name for file in tmp_path.iterdir()]
     for prefix in ("epoch", "bestE_", "bestF_"):
         n_matches = sum(file.startswith(prefix) for file in output_files)
         assert (
             n_matches == 1
         ), f"Expected 1 {prefix} file, found {n_matches} in {output_files}"
 
+    # expect ImportError when passing wandb_path without wandb installed
+    err_msg = "Weights and Biases not installed. pip install wandb to use wandb logging"
+    with monkeypatch.context() as ctx, pytest.raises(ImportError, match=err_msg):  # noqa: PT012
+        ctx.setattr("chgnet.trainer.trainer.wandb", None)
+        _ = Trainer(model=chgnet, wandb_path="some-org/some-project")
+
 
 def test_trainer_composition_model(tmp_path: Path) -> None:
-    chgnet = CHGNet.load()
     for param in chgnet.composition_model.parameters():
         assert param.requires_grad is False
-    train_loader, val_loader, _test_loader = get_train_val_test_loader(
-        data, batch_size=16, train_ratio=0.9, val_ratio=0.05
-    )
     trainer = Trainer(
         model=chgnet,
         targets="efsm",
@@ -79,16 +92,14 @@ def test_trainer_composition_model(tmp_path: Path) -> None:
         learning_rate=1e-2,
         epochs=5,
     )
-    dir_name = "test_tmp_dir2"
-    test_dir = tmp_path / dir_name
     initial_weights = chgnet.composition_model.state_dict()["fc.weight"].clone()
     trainer.train(
-        train_loader, val_loader, save_dir=test_dir, train_composition_model=True
+        train_loader, val_loader, save_dir=tmp_path, train_composition_model=True
     )
     for param in chgnet.composition_model.parameters():
         assert param.requires_grad is True
 
-    output_files = list(test_dir.iterdir())
+    output_files = list(tmp_path.iterdir())
     weights_path = next(file for file in output_files if file.name.startswith("epoch"))
     new_chgnet = CHGNet.from_file(weights_path)
     for param in new_chgnet.composition_model.parameters():
@@ -101,3 +112,76 @@ def test_trainer_composition_model(tmp_path: Path) -> None:
     expect[0][10] = 0
     expect[0][16] = 0
     assert torch.all(comparison == expect)
+
+
+@pytest.fixture
+def mock_wandb():
+    with patch("chgnet.trainer.trainer.wandb") as mock:
+        yield mock
+
+
+def test_wandb_init(mock_wandb):
+    chgnet = CHGNet.load()
+    _trainer = Trainer(
+        model=chgnet,
+        wandb_path="test-project/test-run",
+        wandb_init_kwargs={"tags": ["test"]},
+    )
+    expected_config = {
+        "targets": "ef",
+        "energy_loss_ratio": 1,
+        "force_loss_ratio": 1,
+        "stress_loss_ratio": 0.1,
+        "mag_loss_ratio": 0.1,
+        "optimizer": "Adam",
+        "scheduler": "CosLR",
+        "criterion": "MSE",
+        "epochs": 50,
+        "starting_epoch": 0,
+        "learning_rate": 0.001,
+        "print_freq": 100,
+        "torch_seed": None,
+        "data_seed": None,
+        "use_device": None,
+        "check_cuda_mem": False,
+        "wandb_path": "test-project/test-run",
+        "wandb_init_kwargs": {"tags": ["test"]},
+        "extra_run_config": None,
+    }
+    mock_wandb.init.assert_called_once_with(
+        project="test-project", name="test-run", config=expected_config, tags=["test"]
+    )
+
+
+def test_wandb_log_frequency(mock_wandb):
+    trainer = Trainer(model=chgnet, wandb_path="test-project/test-run", epochs=1)
+
+    # Test epoch logging
+    trainer.train(train_loader, val_loader, wandb_log_freq="epoch", save_dir="")
+    assert (
+        mock_wandb.log.call_count == 2 * trainer.epochs
+    ), "Expected one train and one val log per epoch"
+
+    mock_wandb.log.reset_mock()
+
+    # Test batch logging
+    trainer.train(train_loader, val_loader, wandb_log_freq="batch", save_dir="")
+    expected_batch_calls = trainer.epochs * len(train_loader)
+    assert (
+        mock_wandb.log.call_count > expected_batch_calls
+    ), "Expected more calls for batch logging"
+
+    # Test log content (for both epoch and batch logging)
+    for call_args in mock_wandb.log.call_args_list:
+        logged_data = call_args[0][0]
+        assert isinstance(logged_data, dict), "Logged data should be a dictionary"
+        assert any(
+            key.endswith("_mae") for key in logged_data
+        ), "Logged data should contain MAE metrics"
+
+    mock_wandb.log.reset_mock()
+
+    # Test no logging when wandb_path is not provided
+    trainer_no_wandb = Trainer(model=chgnet, epochs=1)
+    trainer_no_wandb.train(train_loader, val_loader)
+    mock_wandb.log.assert_not_called()

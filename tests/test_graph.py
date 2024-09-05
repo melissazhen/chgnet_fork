@@ -6,7 +6,7 @@ import pytest
 from chgnet.graph.graph import DirectedEdge, Graph, Node, UndirectedEdge
 
 
-@pytest.fixture()
+@pytest.fixture
 def graph() -> Graph:
     """Create a graph with 3 nodes and 3 directed edges."""
     nodes = [Node(index=idx) for idx in range(3)]
@@ -50,7 +50,7 @@ def test_as_dict(graph: Graph) -> None:
     assert len(graph_dict["undirected_edges_list"]) == 3
 
 
-@pytest.fixture()
+@pytest.fixture
 def bigraph() -> Graph:
     """Create a bi-directional graph with 3 nodes and 4 bi-directed edges."""
     nodes = [Node(index=idx) for idx in range(3)]
@@ -100,7 +100,7 @@ def test_directed_edge() -> None:
     info = {"image": np.zeros(3), "distance": 1}
     edge = DirectedEdge([0, 1], index=0, info=info)
     undirected = edge.make_undirected(index=0, info=info)
-    assert edge == edge
+    assert edge == edge  # noqa: PLR0124
     assert edge == undirected
     assert edge.nodes == [0, 1]
     assert edge.index == 0

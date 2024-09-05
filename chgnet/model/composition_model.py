@@ -12,6 +12,7 @@ from chgnet.model.functions import GatedMLP, find_activation
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from chgnet.graph.crystalgraph import CrystalGraph
 
@@ -23,6 +24,7 @@ class CompositionModel(nn.Module):
 
     def __init__(
         self,
+        *,
         atom_fea_dim: int = 64,
         activation: str = "silu",
         is_intensive: bool = True,
@@ -61,7 +63,7 @@ class CompositionModel(nn.Module):
         composition_feas = self._assemble_graphs(graphs)
         return self._get_energy(composition_feas)
 
-    def _assemble_graphs(self, graphs: list[CrystalGraph]):
+    def _assemble_graphs(self, graphs: list[CrystalGraph]) -> Tensor:
         """Assemble a list of graphs into one-hot composition encodings.
 
         Args:
@@ -87,7 +89,9 @@ class AtomRef(nn.Module):
     From: https://github.com/materialsvirtuallab/m3gnet/.
     """
 
-    def __init__(self, is_intensive: bool = True, max_num_elements: int = 94) -> None:
+    def __init__(
+        self, *, is_intensive: bool = True, max_num_elements: int = 94
+    ) -> None:
         """Initialize an AtomRef model."""
         super().__init__()
         self.is_intensive = is_intensive
@@ -95,7 +99,7 @@ class AtomRef(nn.Module):
         self.fc = nn.Linear(max_num_elements, 1, bias=False)
         self.fitted = False
 
-    def forward(self, graphs: list[CrystalGraph]):
+    def forward(self, graphs: list[CrystalGraph]) -> Tensor:
         """Get the energy of a list of CrystalGraphs.
 
         Args:
@@ -104,7 +108,8 @@ class AtomRef(nn.Module):
         Returns:
             energy (tensor)
         """
-        assert self.fitted is True, "composition model need to be fitted first!"
+        if not self.fitted:
+            raise ValueError("composition model needs to be fitted first!")
         composition_feas = self._assemble_graphs(graphs)
         return self._get_energy(composition_feas)
 
@@ -167,7 +172,7 @@ class AtomRef(nn.Module):
         self.fc.load_state_dict(state_dict)
         self.fitted = True
 
-    def _assemble_graphs(self, graphs: list[CrystalGraph]):
+    def _assemble_graphs(self, graphs: list[CrystalGraph]) -> Tensor:
         """Assemble a list of graphs into one-hot composition encodings
         Args:
             graphs (list[Tensor]): a list of CrystalGraphs
@@ -185,7 +190,7 @@ class AtomRef(nn.Module):
             composition_feas.append(composition_fea)
         return torch.stack(composition_feas, dim=0).float()
 
-    def get_site_energies(self, graphs: list[CrystalGraph]):
+    def get_site_energies(self, graphs: list[CrystalGraph]) -> list[Tensor]:
         """Predict the site energies given a list of CrystalGraphs.
 
         Args:
@@ -199,16 +204,16 @@ class AtomRef(nn.Module):
             for graph in graphs
         ]
 
-    def initialize_from(self, dataset: str):
+    def initialize_from(self, dataset: str) -> None:
         """Initialize pre-fitted weights from a dataset."""
-        if dataset in ["MPtrj", "MPtrj_e"]:
+        if dataset in {"MPtrj", "MPtrj_e"}:
             self.initialize_from_MPtrj()
         elif dataset == "MPF":
             self.initialize_from_MPF()
         else:
             raise NotImplementedError(f"{dataset=} not supported yet")
 
-    def initialize_from_MPtrj(self):
+    def initialize_from_MPtrj(self) -> None:  # noqa: N802
         """Initialize pre-fitted weights from MPtrj dataset."""
         state_dict = collections.OrderedDict()
         state_dict["weight"] = torch.tensor(
@@ -313,7 +318,7 @@ class AtomRef(nn.Module):
         self.is_intensive = True
         self.fitted = True
 
-    def initialize_from_MPF(self):
+    def initialize_from_MPF(self) -> None:  # noqa: N802
         """Initialize pre-fitted weights from MPF dataset."""
         state_dict = collections.OrderedDict()
         state_dict["weight"] = torch.tensor(
@@ -418,7 +423,7 @@ class AtomRef(nn.Module):
         self.is_intensive = False
         self.fitted = True
 
-    def initialize_from_numpy(self, file_name):
+    def initialize_from_numpy(self, file_name: str | Path) -> None:
         """Initialize pre-fitted weights from numpy file."""
         atom_ref_np = np.load(file_name)
         state_dict = collections.OrderedDict()

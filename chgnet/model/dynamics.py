@@ -31,6 +31,7 @@ from chgnet.utils import determine_device
 if TYPE_CHECKING:
     from ase.io import Trajectory
     from ase.optimize.optimize import Optimizer
+    from typing_extensions import Self
 
 # We would like to thank M3GNet develop team for this module
 # source: https://github.com/materialsvirtuallab/m3gnet
@@ -55,8 +56,9 @@ class CHGNetCalculator(Calculator):
     def __init__(
         self,
         model: CHGNet | None = None,
+        *,
         use_device: str | None = None,
-        check_cuda_mem: bool = True,
+        check_cuda_mem: bool = False,
         stress_weight: float | None = 1 / 160.21766208,
         on_isolated_atoms: Literal["ignore", "warn", "error"] = "warn",
         **kwargs,
@@ -72,7 +74,7 @@ class CHGNetCalculator(Calculator):
                 automatically selected based on the available options.
                 Default = None
             check_cuda_mem (bool): Whether to use cuda with most available memory
-                Default = True
+                Default = False
             stress_weight (float): the conversion factor to convert GPa to eV/A^3.
                 Default = 1/160.21
             on_isolated_atoms ('ignore' | 'warn' | 'error'): how to handle Structures
@@ -87,15 +89,18 @@ class CHGNetCalculator(Calculator):
         self.device = device
 
         # Move the model to the specified device
-        self.model = (model or CHGNet.load(verbose=False)).to(self.device)
+        if model is None:
+            self.model = CHGNet.load(verbose=False, use_device=self.device)
+        else:
+            self.model = model.to(self.device)
         self.model.graph_converter.set_isolated_atom_response(on_isolated_atoms)
         self.stress_weight = stress_weight
         print(f"CHGNet will run on {self.device}")
 
     @classmethod
-    def from_file(cls, path: str, use_device: str | None = None, **kwargs):
+    def from_file(cls, path: str, use_device: str | None = None, **kwargs) -> Self:
         """Load a user's CHGNet model and initialize the Calculator."""
-        return CHGNetCalculator(
+        return cls(
             model=CHGNet.from_file(path),
             use_device=use_device,
             **kwargs,
@@ -215,6 +220,7 @@ class StructOptimizer:
     def relax(
         self,
         atoms: Structure | Atoms,
+        *,
         fmax: float | None = 0.1,
         steps: int | None = 500,
         relax_cell: bool | None = True,
@@ -238,13 +244,13 @@ class StructOptimizer:
                 Default = True
             ase_filter (str | ase.filters.Filter): The filter to apply to the atoms
                 object for relaxation. Default = FrechetCellFilter
-                Used to default to ExpCellFilter but was removed due to bug reported in
-                https://gitlab.com/ase/ase/-/issues/1321 and fixed in
+                Default used to be ExpCellFilter which was removed due to bug reported
+                in https://gitlab.com/ase/ase/-/issues/1321 and fixed in
                 https://gitlab.com/ase/ase/-/merge_requests/3024.
             save_path (str | None): The path to save the trajectory.
                 Default = None
-            loginterval (int | None): Interval for logging trajectory and crystal feas
-                Default = 1
+            loginterval (int | None): Interval for logging trajectory and crystal
+                features. Default = 1
             crystal_feas_save_path (str | None): Path to save crystal feature vectors
                 which are logged at a loginterval rage
                 Default = None
@@ -258,30 +264,18 @@ class StructOptimizer:
             dict[str, Structure | TrajectoryObserver]:
                 A dictionary with 'final_structure' and 'trajectory'.
         """
-        try:
-            import ase.filters as filter_classes
-            from ase.filters import Filter
+        from ase import filters
+        from ase.filters import Filter
 
-        except ImportWarning:
-            import ase.constraints as filter_classes
-            from ase.constraints import Filter
-
-            if ase_filter == "FrechetCellFilter":
-                ase_filter = "ExpCellFilter"
-            print(
-                "Failed to import ase.filters. Default filter to ExpCellFilter. "
-                "For better relaxation accuracy with the new FrechetCellFilter, "
-                "run pip install git+https://gitlab.com/ase/ase"
-            )
         valid_filter_names = [
             name
-            for name, cls in inspect.getmembers(filter_classes, inspect.isclass)
+            for name, cls in inspect.getmembers(filters, inspect.isclass)
             if issubclass(cls, Filter)
         ]
 
         if isinstance(ase_filter, str):
             if ase_filter in valid_filter_names:
-                ase_filter = getattr(filter_classes, ase_filter)
+                ase_filter = getattr(filters, ase_filter)
             else:
                 raise ValueError(
                     f"Invalid {ase_filter=}, must be one of {valid_filter_names}. "
@@ -400,7 +394,7 @@ class CrystalFeasObserver:
 
     def __call__(self) -> None:
         """Record Atoms crystal feature vectors after an MD/relaxation step."""
-        self.crystal_feature_vectors.append(self.atoms._calc.results["crystal_fea"])
+        self.crystal_feature_vectors.append(self.atoms._calc.results["crystal_fea"])  # noqa: SLF001
 
     def __len__(self) -> int:
         """Number of recorded steps."""
@@ -419,6 +413,7 @@ class MolecularDynamics:
     def __init__(
         self,
         atoms: Atoms | Structure,
+        *,
         model: CHGNet | CHGNetCalculator | None = None,
         ensemble: str = "nvt",
         thermostat: str = "Berendsen_inhomogeneous",
@@ -729,7 +724,7 @@ class MolecularDynamics:
         self.dyn.atoms = atoms
         self.dyn.atoms.calc = calculator
 
-    def upper_triangular_cell(self, verbose: bool | None = False) -> None:
+    def upper_triangular_cell(self, *, verbose: bool | None = False) -> None:
         """Transform to upper-triangular cell.
         ASE Nose-Hoover implementation only supports upper-triangular cell
         while ASE's canonical description is lower-triangular cell.
@@ -738,7 +733,7 @@ class MolecularDynamics:
             verbose (bool): Whether to notify user about upper-triangular cell
                 transformation. Default = False
         """
-        if not NPT._isuppertriangular(self.atoms.get_cell()):
+        if not NPT._isuppertriangular(self.atoms.get_cell()):  # noqa: SLF001
             a, b, c, alpha, beta, gamma = self.atoms.cell.cellpar()
             angles = np.radians((alpha, beta, gamma))
             sin_a, sin_b, _sin_g = np.sin(angles)
@@ -799,6 +794,7 @@ class EquationOfState:
     def fit(
         self,
         atoms: Structure | Atoms,
+        *,
         n_points: int = 11,
         fmax: float | None = 0.1,
         steps: int | None = 500,
@@ -890,6 +886,6 @@ class EquationOfState:
             return 1 / self.bm.b0
         if unit == "GPa^-1":
             return 1 / self.bm.b0_GPa
-        if unit in ("Pa^-1", "m^2/N"):
+        if unit in {"Pa^-1", "m^2/N"}:
             return 1 / (self.bm.b0_GPa * 1e9)
         raise NotImplementedError("unit has to be one of A^3/eV, GPa^-1 Pa^-1 or m^2/N")

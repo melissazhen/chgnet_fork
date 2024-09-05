@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import inspect
+
 import numpy as np
 import pytest
-from pymatgen.core import Structure
-from pytest import mark
+from pymatgen.core import Lattice, Structure
 
 from chgnet import ROOT
 from chgnet.graph import CrystalGraphConverter
@@ -14,13 +15,13 @@ graph = CrystalGraphConverter()(structure, graph_id="test-model")
 model = CHGNet.load()
 
 
-@mark.parametrize("atom_fea_dim", [1, 64])
-@mark.parametrize("bond_fea_dim", [1, 64])
-@mark.parametrize("angle_fea_dim", [1, 64])
-@mark.parametrize("num_radial", [1, 9])
-@mark.parametrize("num_angular", [1, 9])
-@mark.parametrize("n_conv", [1, 4])
-@mark.parametrize("composition_model", ["MPtrj", "MPtrj_e", "MPF"])
+@pytest.mark.parametrize("atom_fea_dim", [1, 64])
+@pytest.mark.parametrize("bond_fea_dim", [1, 64])
+@pytest.mark.parametrize("angle_fea_dim", [1, 64])
+@pytest.mark.parametrize("num_radial", [1, 9])
+@pytest.mark.parametrize("num_angular", [1, 9])
+@pytest.mark.parametrize("n_conv", [1, 4])
+@pytest.mark.parametrize("composition_model", ["MPtrj", "MPtrj_e", "MPF"])
 def test_model(
     atom_fea_dim: int,
     bond_fea_dim: int,
@@ -118,8 +119,8 @@ def test_predict_structure() -> None:
     assert out["atom_fea"].shape == (8, 64)
 
 
-@mark.parametrize("axis", [[0, 0, 1], [1, 1, 0], [-2, 3, 1]])
-@mark.parametrize("rotation_angle", [5, 30, 45, 120])
+@pytest.mark.parametrize("axis", [[0, 0, 1], [1, 1, 0], [-2, 3, 1]])
+@pytest.mark.parametrize("rotation_angle", [5, 30, 45, 120])
 def test_predict_structure_rotated(rotation_angle: float, axis: list) -> None:
     from pymatgen.transformations.standard_transformations import RotationTransformation
 
@@ -206,6 +207,18 @@ def test_predict_batched_structures() -> None:
             )
 
 
+def test_predict_isolated_structures() -> None:
+    lattice10 = Lattice.cubic(10)
+    lattice20 = Lattice.cubic(20)
+    positions = [[0, 0, 0], [0.5, 0.5, 0.5]]
+
+    # Create the structure
+    model.graph_converter.set_isolated_atom_response("ignore")
+    prediction10 = model.predict_structure(Structure(lattice10, ["H", "H"], positions))
+    prediction20 = model.predict_structure(Structure(lattice20, ["H", "H"], positions))
+    assert prediction10["e"] == pytest.approx(prediction20["e"], rel=1e-5, abs=1e-5)
+
+
 def test_as_to_from_dict() -> None:
     dct = model.as_dict()
     assert {*dct} == {"model_args", "state_dict"}
@@ -228,11 +241,11 @@ def test_model_load_version_params(
     assert model.version == v030_key
     assert model.n_params == v030_params
     stdout, stderr = capsys.readouterr()
-    expected_stdout = lambda version, params: (
-        f"CHGNet v{version} initialized with {params:,} parameters\n"
+
+    assert stdout == (
+        f"CHGNet v{v030_key} initialized with {v030_params:,} parameters\n"
         "CHGNet will run on cpu\n"
     )
-    assert stdout == expected_stdout(v030_key, v030_params)
     assert stderr == ""
 
     v020_key, v020_params = "0.2.0", 400_438
@@ -240,17 +253,25 @@ def test_model_load_version_params(
     assert model.version == v020_key
     assert model.n_params == v020_params
     stdout, stderr = capsys.readouterr()
-    assert stdout == expected_stdout(v020_key, v020_params)
+    assert stdout == (
+        f"CHGNet v{v020_key} initialized with {v020_params:,} parameters\n"
+        "CHGNet will run on cpu\n"
+    )
     assert stderr == ""
 
     model_name = "0.1.0"  # invalid
     with pytest.raises(ValueError, match=f"Unknown {model_name=}"):
         CHGNet.load(model_name=model_name)
 
-    #     # set CHGNET_DEVICE to "cuda" and test
-    monkeypatch.setenv("CHGNET_DEVICE", env_device := "foobar")
-    with pytest.raises(
-        RuntimeError,
-        match=f"Expected one of cpu, .+type at start of device string: {env_device}",
+    bad_env_device = "foobar"
+    err_msg = f"Expected one of cpu, .+type at start of device string: {bad_env_device}"
+    with (  # noqa: PT012
+        monkeypatch.context() as ctx,
+        pytest.raises(RuntimeError, match=err_msg),
     ):
+        ctx.setenv("CHGNET_DEVICE", bad_env_device)
         CHGNet.load()
+
+    # check check_cuda_mem defaults to False
+    inspect_signature = inspect.signature(CHGNet.load)
+    assert inspect_signature.parameters["check_cuda_mem"].default is False

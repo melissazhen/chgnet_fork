@@ -20,7 +20,7 @@ class Node:
         self.info = info
         self.neighbors: dict[int, list[DirectedEdge | UndirectedEdge]] = {}
 
-    def add_neighbor(self, index, edge):
+    def add_neighbor(self, index, edge) -> None:
         """Draw an directed edge between self and the node specified by index.
 
         Args:
@@ -44,7 +44,7 @@ class Edge(ABC):
         self.index = index
         self.info = info
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         """String representation of this edge."""
         nodes, index, info = self.nodes, self.index, self.info
         return f"{type(self).__name__}({nodes=}, {index=}, {info=})"
@@ -66,7 +66,7 @@ class UndirectedEdge(Edge):
 
     __hash__ = Edge.__hash__
 
-    def __eq__(self, other):
+    def __eq__(self, other: object) -> bool:
         """Check if two undirected edges are equal."""
         return set(self.nodes) == set(other.nodes) and self.info == other.info
 
@@ -127,7 +127,9 @@ class Graph:
         self.undirected_edges: dict[frozenset[int], list[UndirectedEdge]] = {}
         self.undirected_edges_list: list[UndirectedEdge] = []
 
-    def add_edge(self, center_index, neighbor_index, image, distance) -> None:
+    def add_edge(
+        self, center_index, neighbor_index, image, distance, dist_tol: float = 1e-6
+    ) -> None:
         """Add an directed edge to the graph.
 
         Args:
@@ -135,6 +137,8 @@ class Graph:
             neighbor_index (int): neighbor node index
             image (np.array): the periodic cell image the neighbor is from
             distance (float): distance between center and neighbor.
+            dist_tol (float): tolerance for distance comparison between edges.
+                Default = 1e-6
         """
         # Create directed_edge (DE) index using the length of added DEs
         directed_edge_index = len(self.directed_edges_list)
@@ -173,21 +177,21 @@ class Graph:
             # different image and distance (this is possible consider periodicity)
             for undirected_edge in self.undirected_edges[tmp]:
                 if (
-                    abs(undirected_edge.info["distance"] - distance) < 1e-6
+                    abs(undirected_edge.info["distance"] - distance) < dist_tol
                     and len(undirected_edge.info["directed_edge_index"]) == 1
                 ):
                     # There is an undirected edge with similar length and only one of
                     # the directed edges associated has been added
-                    added_DE = self.directed_edges_list[
+                    added_dir_edge = self.directed_edges_list[
                         undirected_edge.info["directed_edge_index"][0]
                     ]
 
                     # See if the DE that's associated to this UDE
                     # is the reverse of our DE
-                    if added_DE == this_directed_edge:
+                    if added_dir_edge == this_directed_edge:
                         # Add UDE index to this DE
                         this_directed_edge.info["undirected_edge_index"] = (
-                            added_DE.info["undirected_edge_index"]
+                            added_dir_edge.info["undirected_edge_index"]
                         )
 
                         # At the center node, draw edge with this DE
@@ -217,7 +221,7 @@ class Graph:
             self.nodes[center_index].add_neighbor(neighbor_index, this_directed_edge)
             self.directed_edges_list.append(this_directed_edge)
 
-    def adjacency_list(self):
+    def adjacency_list(self) -> tuple[list[list[int]], list[int]]:
         """Get the adjacency list
         Return:
             graph: the adjacency list
@@ -240,7 +244,7 @@ class Graph:
         ]
         return graph, directed2undirected
 
-    def line_graph_adjacency_list(self, cutoff):
+    def line_graph_adjacency_list(self, cutoff) -> tuple[list[list[int]], list[int]]:
         """Get the line graph adjacency list.
 
         Args:
@@ -264,11 +268,12 @@ class Graph:
                 a list of length = num_undirected_edge that
                 maps the undirected edge index to one of its directed edges indices
         """
-        assert len(self.directed_edges_list) == 2 * len(self.undirected_edges_list), (
-            f"Error: number of directed edges={len(self.directed_edges_list)} != 2 * "
-            f"number of undirected edges={len(self.directed_edges_list)}!"
-            f"This indicates directed edges are not complete"
-        )
+        if len(self.directed_edges_list) != 2 * len(self.undirected_edges_list):
+            raise ValueError(
+                f"Error: number of directed edges={len(self.directed_edges_list)} != 2 "
+                f"* number of undirected edges={len(self.directed_edges_list)}!"
+                f"This indicates directed edges are not complete"
+            )
         line_graph = []
         undirected2directed = []
 
@@ -285,14 +290,15 @@ class Graph:
             # if encountered exception,
             # it means after Atom_Graph creation, the UDE has only 1 DE associated
             # This exception is not encountered from the develop team's experience
-            assert len(u_edge.info["directed_edge_index"]) == 2, (
-                "Did not find 2 Directed_edges !!!"
-                f"undirected edge {u_edge} has:"
-                f"edge.info['directed_edge_index'] = "
-                f"{u_edge.info['directed_edge_index']}"
-                f"len directed_edges_list = {len(self.directed_edges_list)}"
-                f"len undirected_edges_list = {len(self.undirected_edges_list)}"
-            )
+            if len(u_edge.info["directed_edge_index"]) != 2:  # noqa: PLR2004
+                raise ValueError(
+                    "Did not find 2 Directed_edges !!!"
+                    f"undirected edge {u_edge} has:"
+                    f"edge.info['directed_edge_index'] = "
+                    f"{u_edge.info['directed_edge_index']}"
+                    f"len directed_edges_list = {len(self.directed_edges_list)}"
+                    f"len undirected_edges_list = {len(self.undirected_edges_list)}"
+                )
 
             # This UDE is valid to be considered as a node in Bond_Graph
 
@@ -300,24 +306,26 @@ class Graph:
             # DE1 should have center=center1 and DE2 should have center=center2
             # We will need to find directed edges with center = center1
             # and create angles with DE1, then do the same for center2 and DE2
-            for center, DE in zip(u_edge.nodes, u_edge.info["directed_edge_index"]):
+            for center, dir_edge in zip(
+                u_edge.nodes, u_edge.info["directed_edge_index"]
+            ):
                 for directed_edges in self.nodes[center].neighbors.values():
                     for directed_edge in directed_edges:
-                        if directed_edge.index == DE:
+                        if directed_edge.index == dir_edge:
                             continue
                         if directed_edge.info["distance"] < cutoff:
                             line_graph.append(
                                 [
                                     center,
                                     u_edge.index,
-                                    DE,
+                                    dir_edge,
                                     directed_edge.info["undirected_edge_index"],
                                     directed_edge.index,
                                 ]
                             )
         return line_graph, undirected2directed
 
-    def undirected2directed(self):
+    def undirected2directed(self) -> list[int]:
         """The index map from undirected_edge index to one of its directed_edge
         index.
         """
@@ -326,7 +334,7 @@ class Graph:
             for undirected_edge in self.undirected_edges_list
         ]
 
-    def as_dict(self):
+    def as_dict(self) -> dict:
         """Return dictionary serialization of a Graph."""
         return {
             "nodes": self.nodes,
@@ -336,7 +344,7 @@ class Graph:
             "undirected_edges_list": self.undirected_edges_list,
         }
 
-    def to(self, filename="graph.json"):
+    def to(self, filename="graph.json") -> None:
         """Save graph dictionary to file."""
         write_json(self.as_dict(), filename)
 

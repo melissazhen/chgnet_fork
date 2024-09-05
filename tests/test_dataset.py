@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+
 import numpy as np
 import pytest
 import torch
@@ -14,9 +16,10 @@ coords = [[0, 0, 0], [0.5, 0.5, 0.5]]
 NaCl = Structure(lattice, species, coords)
 
 
-@pytest.fixture()
+@pytest.fixture
 def structure_data() -> StructureData:
     """Create a graph with 3 nodes and 3 directed edges."""
+    random.seed(42)
     structures, energies, forces, stresses, magmoms, structure_ids = (
         [],
         [],
@@ -25,7 +28,7 @@ def structure_data() -> StructureData:
         [],
         [],
     )
-    for _ in range(100):
+    for index in range(100):
         struct = NaCl.copy()
         struct.perturb(0.1)
         structures.append(struct)
@@ -33,7 +36,7 @@ def structure_data() -> StructureData:
         forces.append(np.random.random([2, 3]))
         stresses.append(np.random.random([3, 3]))
         magmoms.append(np.random.random([2, 1]))
-        structure_ids.append("tmp_id")
+        structure_ids.append(index)
     return StructureData(
         structures=structures,
         energies=energies,
@@ -47,7 +50,8 @@ def structure_data() -> StructureData:
 def test_structure_data(structure_data: StructureData) -> None:
     get_one = structure_data[0]
     assert isinstance(get_one[0], CrystalGraph)
-    assert get_one[0].mp_id == "tmp_id"
+    assert isinstance(get_one[0].mp_id, int)
+    assert get_one[0].mp_id == 42
     assert isinstance(get_one[1], dict)
     assert isinstance(get_one[1]["e"], torch.Tensor)
     assert isinstance(get_one[1]["f"], torch.Tensor)
@@ -85,3 +89,21 @@ def test_structure_data_inconsistent_length():
         == f"Inconsistent number of structures and labels: {len(structures)=}, "
         f"{len(forces)=}"
     )
+
+
+def test_dataset_no_shuffling():
+    n_samples = 100
+    structure_ids = list(range(n_samples))
+
+    structure_data = StructureData(
+        structures=[NaCl.copy() for _ in range(n_samples)],
+        energies=np.random.random(n_samples),
+        forces=np.random.random([n_samples, 2, 3]),
+        stresses=np.random.random([n_samples, 3, 3]),
+        magmoms=np.random.random([n_samples, 2, 1]),
+        structure_ids=structure_ids,
+        shuffle=False,
+    )
+    sample_ids = [data[0].mp_id for data in structure_data]
+    # shuffle=False means structure_ids should be in order
+    assert sample_ids == structure_ids

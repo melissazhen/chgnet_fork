@@ -19,6 +19,8 @@ from chgnet.graph import CrystalGraph, CrystalGraphConverter
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from typing_extensions import Self
+
     from chgnet import TrainTask
 
 warnings.filterwarnings("ignore")
@@ -34,10 +36,12 @@ class StructureData(Dataset):
         structures: list[Structure],
         energies: list[float],
         forces: list[Sequence[Sequence[float]]],
+        *,
         stresses: list[Sequence[Sequence[float]]] | None = None,
         magmoms: list[Sequence[Sequence[float]]] | None = None,
-        structure_ids: list[str] | None = None,
+        structure_ids: list | None = None,
         graph_converter: CrystalGraphConverter | None = None,
+        shuffle: bool = True,
     ) -> None:
         """Initialize the dataset.
 
@@ -46,11 +50,16 @@ class StructureData(Dataset):
             energies (list[float]): [data_size, 1]
             forces (list[list[float]]): [data_size, n_atoms, 3]
             stresses (list[list[float]], optional): [data_size, 3, 3]
+                Default = None
             magmoms (list[list[float]], optional): [data_size, n_atoms, 1]
-            structure_ids (list[str], optional): a list of ids to track the structures
+                Default = None
+            structure_ids (list, optional): a list of ids to track the structures
+                Default = None
             graph_converter (CrystalGraphConverter, optional): Converts the structures
                 to graphs. If None, it will be set to CHGNet 0.3.0 converter
                 with AtomGraph cutoff = 6A.
+            shuffle (bool): whether to shuffle the sequence of dataset
+                Default = True
 
         Raises:
             RuntimeError: if the length of structures and labels (energies, forces,
@@ -58,7 +67,7 @@ class StructureData(Dataset):
         """
         for idx, struct in enumerate(structures):
             if not isinstance(struct, Structure):
-                raise ValueError(f"{idx} is not a pymatgen Structure object: {struct}")
+                raise TypeError(f"{idx} is not a pymatgen Structure object: {struct}")
         for name in "energies forces stresses magmoms structure_ids".split():
             labels = locals()[name]
             if labels is not None and len(labels) != len(structures):
@@ -73,13 +82,60 @@ class StructureData(Dataset):
         self.magmoms = magmoms
         self.structure_ids = structure_ids
         self.keys = np.arange(len(structures))
-        random.shuffle(self.keys)
-        print(f"{len(structures)} structures imported")
+        if shuffle:
+            random.shuffle(self.keys)
+        print(f"{type(self).__name__} imported {len(structures):,} structures")
         self.graph_converter = graph_converter or CrystalGraphConverter(
             atom_graph_cutoff=6, bond_graph_cutoff=3
         )
         self.failed_idx: list[int] = []
         self.failed_graph_id: dict[str, str] = {}
+
+    @classmethod
+    def from_vasp(
+        cls,
+        file_root: str,
+        *,
+        check_electronic_convergence: bool = True,
+        save_path: str | None = None,
+        graph_converter: CrystalGraphConverter | None = None,
+        shuffle: bool = True,
+    ) -> Self:
+        """Parse VASP output files into structures and labels and feed into the dataset.
+
+        Args:
+            file_root (str): the directory of the VASP calculation outputs
+            check_electronic_convergence (bool): if set to True, this function will
+                raise Exception to VASP calculation that did not achieve
+                electronic convergence.
+                Default = True
+            save_path (str): path to save the parsed VASP labels
+                Default = None
+            graph_converter (CrystalGraphConverter, optional): Converts the structures
+                to graphs. If None, it will be set to CHGNet 0.3.0 converter
+                with AtomGraph cutoff = 6A.
+            shuffle (bool): whether to shuffle the sequence of dataset
+                Default = True
+        """
+        result_dict = utils.parse_vasp_dir(
+            base_dir=file_root,
+            check_electronic_convergence=check_electronic_convergence,
+            save_path=save_path,
+        )
+        return cls(
+            structures=result_dict["structure"],
+            energies=result_dict["energy_per_atom"],
+            forces=result_dict["force"],
+            stresses=None
+            if result_dict["stress"] in [None, []]
+            else result_dict["stress"],
+            magmoms=None
+            if result_dict["magmom"] in [None, []]
+            else result_dict["magmom"],
+            structure_ids=np.arange(len(result_dict["structure"])),
+            graph_converter=graph_converter,
+            shuffle=shuffle,
+        )
 
     def __len__(self) -> int:
         """Get the number of structures in this dataset."""
@@ -145,6 +201,7 @@ class CIFData(Dataset):
     def __init__(
         self,
         cif_path: str,
+        *,
         labels: str | dict = "labels.json",
         targets: TrainTask = "efsm",
         graph_converter: CrystalGraphConverter | None = None,
@@ -152,6 +209,7 @@ class CIFData(Dataset):
         force_key: str = "force",
         stress_key: str = "stress",
         magmom_key: str = "magmom",
+        shuffle: bool = True,
     ) -> None:
         """Initialize the dataset from a directory containing CIFs.
 
@@ -164,18 +222,21 @@ class CIFData(Dataset):
                 to graphs. If None, it will be set to CHGNet 0.3.0 converter
                 with AtomGraph cutoff = 6A.
             energy_key (str, optional): the key of energy in the labels.
-                Default = "energy_per_atom".
+                Default = "energy_per_atom"
             force_key (str, optional): the key of force in the labels.
-                Default = "force".
+                Default = "force"
             stress_key (str, optional): the key of stress in the labels.
-                Default = "stress".
+                Default = "stress"
             magmom_key (str, optional): the key of magmom in the labels.
-                Default = "magmom".
+                Default = "magmom"
+            shuffle (bool): whether to shuffle the sequence of dataset
+                Default = True
         """
         self.data_dir = cif_path
         self.data = utils.read_json(os.path.join(cif_path, labels))
         self.cif_ids = list(self.data)
-        random.shuffle(self.cif_ids)
+        if shuffle:
+            random.shuffle(self.cif_ids)
         print(f"{cif_path}: {len(self.cif_ids):,} structures imported")
         self.graph_converter = graph_converter or CrystalGraphConverter(
             atom_graph_cutoff=6, bond_graph_cutoff=3
@@ -256,6 +317,7 @@ class GraphData(Dataset):
     def __init__(
         self,
         graph_path: str,
+        *,
         labels: str | dict = "labels.json",
         targets: TrainTask = "efsm",
         exclude: str | list | None = None,
@@ -263,6 +325,7 @@ class GraphData(Dataset):
         force_key: str = "force",
         stress_key: str = "stress",
         magmom_key: str = "magmom",
+        shuffle: bool = True,
     ) -> None:
         """Initialize the dataset from a directory containing saved crystal graphs.
 
@@ -275,13 +338,15 @@ class GraphData(Dataset):
             exclude (str, list | None): the path or list of excluded graphs.
                 Default = None
             energy_key (str, optional): the key of energy in the labels.
-                Default = "energy_per_atom".
+                Default = "energy_per_atom"
             force_key (str, optional): the key of force in the labels.
-                Default = "force".
+                Default = "force"
             stress_key (str, optional): the key of stress in the labels.
-                Default = "stress".
+                Default = "stress"
             magmom_key (str, optional): the key of magmom in the labels.
-                Default = "magmom".
+                Default = "magmom"
+            shuffle (bool): whether to shuffle the sequence of dataset
+                Default = True
         """
         self.graph_path = graph_path
         if isinstance(labels, str):
@@ -301,7 +366,8 @@ class GraphData(Dataset):
         self.keys = [
             (mp_id, graph_id) for mp_id, dic in self.labels.items() for graph_id in dic
         ]
-        random.shuffle(self.keys)
+        if shuffle:
+            random.shuffle(self.keys)
         print(f"{len(self.labels)} mp_ids, {len(self)} frames imported")
         if self.excluded_graph is not None:
             print(f"{len(self.excluded_graph)} graphs are pre-excluded")
@@ -370,6 +436,7 @@ class GraphData(Dataset):
         self,
         train_ratio: float = 0.8,
         val_ratio: float = 0.1,
+        *,
         train_key: list[str] | None = None,
         val_key: list[str] | None = None,
         test_key: list[str] | None = None,
@@ -482,11 +549,13 @@ class StructureJsonData(Dataset):
         self,
         data: str | dict,
         graph_converter: CrystalGraphConverter,
+        *,
         targets: TrainTask = "efsm",
         energy_key: str = "energy_per_atom",
         force_key: str = "force",
         stress_key: str = "stress",
         magmom_key: str = "magmom",
+        shuffle: bool = True,
     ) -> None:
         """Initialize the dataset by reading JSON files.
 
@@ -497,13 +566,15 @@ class StructureJsonData(Dataset):
             targets ("ef" | "efs" | "efm" | "efsm"): The training targets.
                 Default = "efsm"
             energy_key (str, optional): the key of energy in the labels.
-                Default = "energy_per_atom".
+                Default = "energy_per_atom"
             force_key (str, optional): the key of force in the labels.
-                Default = "force".
+                Default = "force"
             stress_key (str, optional): the key of stress in the labels.
-                Default = "stress".
+                Default = "stress"
             magmom_key (str, optional): the key of magmom in the labels.
-                Default = "magmom".
+                Default = "magmom"
+            shuffle (bool): whether to shuffle the sequence of dataset
+                Default = True
         """
         if isinstance(data, str):
             self.data = {}
@@ -518,13 +589,14 @@ class StructureJsonData(Dataset):
         elif isinstance(data, dict):
             self.data = data
         else:
-            raise ValueError(f"data must be JSON path or dictionary, got {type(data)}")
+            raise TypeError(f"data must be JSON path or dictionary, got {type(data)}")
 
         self.keys = [
             (mp_id, graph_id) for mp_id, dct in self.data.items() for graph_id in dct
         ]
-        random.shuffle(self.keys)
-        print(f"{len(self.data)} mp_ids, {len(self)} structures imported")
+        if shuffle:
+            random.shuffle(self.keys)
+        print(f"{len(self.data)} MP IDs, {len(self)} structures imported")
         self.graph_converter = graph_converter
         self.energy_key = energy_key
         self.force_key = force_key
@@ -539,7 +611,7 @@ class StructureJsonData(Dataset):
         return len(self.keys)
 
     @functools.cache  # Cache loaded structures
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> tuple[CrystalGraph, dict[str, Tensor]]:
         """Get one item in the dataset.
 
         Returns:
@@ -591,6 +663,7 @@ class StructureJsonData(Dataset):
         self,
         train_ratio: float = 0.8,
         val_ratio: float = 0.1,
+        *,
         train_key: list[str] | None = None,
         val_key: list[str] | None = None,
         test_key: list[str] | None = None,
@@ -761,7 +834,7 @@ class StructureJsonData_pair(StructureJsonData):
             return self.__getitem__(idx)
 
 
-def collate_graphs(batch_data: list):
+def collate_graphs(batch_data: list) -> tuple[list[CrystalGraph], dict[str, Tensor]]:
     """Collate of list of (graph, target) into batch data.
 
     Args:
@@ -828,13 +901,14 @@ def collate_graphs_pair(batch_data: list):
 
 def get_train_val_test_loader(
     dataset: Dataset,
+    *,
     batch_size: int = 64,
     train_ratio: float = 0.8,
     val_ratio: float = 0.1,
     return_test: bool = True,
     num_workers: int = 0,
     pin_memory: bool = True,
-):
+) -> tuple[DataLoader, DataLoader, DataLoader]:
     """Randomly partition a dataset into train, val, test loaders.
 
     Args:
@@ -893,7 +967,9 @@ def get_train_val_test_loader(
     return train_loader, val_loader
 
 
-def get_loader(dataset, batch_size=64, num_workers=0, pin_memory=True):
+def get_loader(
+    dataset, *, batch_size: int = 64, num_workers: int = 0, pin_memory: bool = True
+) -> DataLoader:
     """Get a dataloader from a dataset.
 
     Args:
